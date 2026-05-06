@@ -1,0 +1,8 @@
+cffi==2.0.0
+cryptography==46.0.5
+pycparser==3.0
+PyQt6==6.10.2
+PyQt6-Qt6==6.10.2
+PyQt6_sip==13.11.1
+pyserial==3.5
+requests==2.32.5

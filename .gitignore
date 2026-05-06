@@ -1,0 +1,42 @@
+@"
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data
+usb-auth-system/data/recovery_blob.json
+usb-auth-system/data/recovery_consumed.flag
+usb-auth-system/data/*.json
+usb-auth-system/data/*.flag
+
+# VeraCrypt containers / sensitive workspace files
+*.hc
+*.tc
+*.veracrypt
+*.container
+
+# Private keys - never commit
+usb-auth-system/keys/*private*.bin
+usb-auth-system/keys/esp_private_key.bin
+*.pem
+*.key
+
+# Allow public keys
+!usb-auth-system/keys/*public*.bin
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+"@ | Out-File -Encoding utf8 .gitignore
