@@ -40,3 +40,6 @@ usb-auth-system/keys/esp_private_key.bin
 .DS_Store
 Thumbs.db
 "@ | Out-File -Encoding utf8 .gitignore
+
+# Runtime app config
+usb-auth-system/data/app_config.json
