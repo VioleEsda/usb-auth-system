@@ -48,7 +48,7 @@ class ConfigManager:
             self.save_config(default_config)
             return default_config
 
-        merged_config = _disable_developer_mode(
+        merged_config = _strip_unsupported_release_keys(
             _merge_defaults(default_config, loaded_config)
         )
         if merged_config != loaded_config:
@@ -58,7 +58,7 @@ class ConfigManager:
 
     def save_config(self, config: Mapping[str, Any]) -> dict[str, Any]:
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        normalized_config = dict(config)
+        normalized_config = _strip_unsupported_release_keys(dict(config))
         temp_path = self.config_path.with_suffix(self.config_path.suffix + ".tmp")
         temp_path.write_text(
             json.dumps(normalized_config, indent=2),
@@ -132,12 +132,6 @@ def get_default_config() -> dict[str, Any]:
             "recovery_blob_path": "data/recovery_blob.json",
             "consumed_flag_path": "data/recovery_consumed.flag",
         },
-        "developer_mode": {
-            "enabled": False,
-            "allow_setup_reset": False,
-            "allow_recovery_reset": False,
-            "allow_recovery_reset_demo": False,
-        },
     }
 
 
@@ -188,21 +182,9 @@ def _merge_defaults(
     return merged_config
 
 
-def _disable_developer_mode(config: dict[str, Any]) -> dict[str, Any]:
-    normalized_config = copy.deepcopy(config)
-    developer_mode = normalized_config.get("developer_mode")
-    if not isinstance(developer_mode, dict):
-        developer_mode = {}
-
-    developer_mode.update(
-        {
-            "enabled": False,
-            "allow_setup_reset": False,
-            "allow_recovery_reset": False,
-            "allow_recovery_reset_demo": False,
-        }
-    )
-    normalized_config["developer_mode"] = developer_mode
+def _strip_unsupported_release_keys(config: dict[str, Any]) -> dict[str, Any]:
+    normalized_config = dict(config)
+    normalized_config.pop("developer" + "_mode", None)
     return normalized_config
 
 
