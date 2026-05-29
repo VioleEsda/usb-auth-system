@@ -189,8 +189,7 @@ class MainWindow(QWidget):
             QFrame#StatusBanner,
             QFrame#DashboardCard,
             QFrame#ActionCard,
-            QFrame#AdvancedCard,
-            QFrame#DeveloperCard {
+            QFrame#AdvancedCard {
                 background: #ffffff;
                 border: 1px solid #d9e2ec;
                 border-radius: 12px;
@@ -198,9 +197,6 @@ class MainWindow(QWidget):
             QFrame#StatusBanner {
                 background: #eff6ff;
                 border-color: #bfdbfe;
-            }
-            QFrame#DeveloperCard {
-                background: #f8fafc;
             }
             QLabel#StatusLabel {
                 background: transparent;
@@ -280,10 +276,6 @@ class MainWindow(QWidget):
                 border-color: #d9e2ec;
                 color: #94a3b8;
             }
-            QPushButton#DangerButton {
-                border-color: #fecaca;
-                color: #991b1b;
-            }
             """
         )
 
@@ -327,15 +319,6 @@ class MainWindow(QWidget):
         self.recovery_button.setObjectName("SecondaryButton")
         self.view_log_button = QPushButton("View Technical Log")
         self.view_log_button.setObjectName("SecondaryButton")
-        self.reset_setup_button = None
-        self.reset_recovery_button = None
-
-        if self._developer_mode_enabled():
-            self.reset_setup_button = QPushButton("Reset Setup Wizard")
-            self.reset_setup_button.setObjectName("SecondaryButton")
-
-        if self._developer_recovery_reset_enabled():
-            self.reset_recovery_button = QPushButton("Reset Recovery Key")
 
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
@@ -371,31 +354,6 @@ class MainWindow(QWidget):
         advanced_layout.addStretch()
         advanced_layout.addWidget(self.view_log_button)
 
-        developer_label = QLabel("Developer/Test")
-        developer_label.setObjectName("SectionLabel")
-
-        developer_frame = QFrame()
-        developer_frame.setObjectName("DeveloperCard")
-        developer_layout = QVBoxLayout(developer_frame)
-        developer_layout.setContentsMargins(16, 14, 16, 16)
-        developer_layout.setSpacing(10)
-        developer_layout.addWidget(developer_label)
-
-        developer_button_layout = QHBoxLayout()
-        developer_button_layout.setSpacing(8)
-        if self.reset_setup_button is not None:
-            developer_button_layout.addWidget(self.reset_setup_button)
-        if self.reset_recovery_button is not None:
-            self.reset_recovery_button.setObjectName("DangerButton")
-            developer_button_layout.addWidget(self.reset_recovery_button)
-        developer_button_layout.addStretch()
-        developer_layout.addLayout(developer_button_layout)
-
-        show_developer_actions = (
-            self.reset_setup_button is not None
-            or self.reset_recovery_button is not None
-        )
-
         cards_grid = QGridLayout()
         cards_grid.setSpacing(12)
         cards_grid.addWidget(self.hardware_card, 0, 0)
@@ -414,8 +372,6 @@ class MainWindow(QWidget):
         layout.addLayout(cards_grid)
         layout.addWidget(actions_frame)
         layout.addWidget(advanced_frame)
-        if show_developer_actions:
-            layout.addWidget(developer_frame)
         layout.addStretch()
 
         self.setLayout(layout)
@@ -429,10 +385,6 @@ class MainWindow(QWidget):
         self.unmount_button.clicked.connect(self.unmount_workspace)
         self.recovery_button.clicked.connect(self.recovery_mode)
         self.view_log_button.clicked.connect(self.open_log_dialog)
-        if self.reset_setup_button is not None:
-            self.reset_setup_button.clicked.connect(self.reset_setup_wizard)
-        if self.reset_recovery_button is not None:
-            self.reset_recovery_button.clicked.connect(self.reset_recovery_key_for_demo)
 
         self.update_dashboard_cards()
 
@@ -559,18 +511,6 @@ class MainWindow(QWidget):
             recovery_state,
         )
 
-    def _developer_mode_enabled(self) -> bool:
-        developer_mode = self.config.get("developer_mode", {})
-        return isinstance(developer_mode, dict) and bool(developer_mode.get("enabled"))
-
-    def _developer_recovery_reset_enabled(self) -> bool:
-        developer_mode = self.config.get("developer_mode", {})
-        return (
-            isinstance(developer_mode, dict)
-            and bool(developer_mode.get("enabled"))
-            and bool(developer_mode.get("allow_recovery_reset_demo"))
-        )
-
     def log(self, message: str):
         self.log_signal.emit(message)
 
@@ -595,121 +535,6 @@ class MainWindow(QWidget):
             self.log("VeraCrypt detected successfully.")
         else:
             self.log("VeraCrypt not detected. Please install VeraCrypt first.")
-
-    def reset_setup_wizard(self):
-        response = QMessageBox.question(
-            self,
-            "Reset Setup Wizard",
-            (
-                "Reset setup state so the Setup Wizard opens on the next app start?\n\n"
-                "This will not delete keys, recovery blobs, containers, or .env."
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if response != QMessageBox.StandardButton.Yes:
-            return
-
-        self.config = self.config_manager.reset_setup_state_for_demo()
-        QMessageBox.information(
-            self,
-            "Setup Wizard Reset",
-            "Setup state was reset. Restart the app to open Setup Wizard again.",
-        )
-
-    def reset_recovery_key_for_demo(self):
-        self.config = self.config_manager.load_config()
-        if not self._developer_recovery_reset_enabled():
-            QMessageBox.warning(
-                self,
-                "Reset Recovery Key",
-                "Developer/Test Mode recovery reset is not enabled.",
-            )
-            return
-
-        response = QMessageBox.question(
-            self,
-            "Reset Recovery Key",
-            (
-                "This is a Developer/Test Mode action. It will invalidate the current "
-                "local recovery state and allow generating a new recovery key for "
-                "demo/testing. It will not delete the workspace container or change "
-                "the hardware key password. Continue?"
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if response != QMessageBox.StandardButton.Yes:
-            return
-
-        if self.pending_recovery_generation or self.recovery_generation_in_progress:
-            QMessageBox.information(
-                self,
-                "Reset Recovery Key",
-                "Recovery generation is already pending or in progress.",
-            )
-            return
-
-        if self.unlock_in_progress:
-            QMessageBox.information(
-                self,
-                "Reset Recovery Key",
-                "Secure unlock is currently in progress. Try again after it finishes.",
-            )
-            return
-
-        if not self.device or not self.device.is_connected():
-            QMessageBox.information(
-                self,
-                "Reset Recovery Key",
-                "Hardware key is not connected. Connect the hardware key before resetting recovery.",
-            )
-            return
-
-        recovery_config = self.config.get("recovery", {})
-        if not isinstance(recovery_config, dict):
-            recovery_config = {}
-
-        blob_path = self._config_runtime_path(
-            recovery_config.get("recovery_blob_path"),
-            self.project_root / "data" / "recovery_blob.json",
-        )
-        consumed_flag_path = self._config_runtime_path(
-            recovery_config.get("consumed_flag_path"),
-            self.project_root / "data" / "recovery_consumed.flag",
-        )
-
-        try:
-            for path in (blob_path, consumed_flag_path):
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    pass
-        except OSError as e:
-            QMessageBox.warning(
-                self,
-                "Reset Recovery Key",
-                f"Failed to reset local recovery state:\n{e}",
-            )
-            return
-
-        self.config = self.config_manager.update_section(
-            "recovery",
-            {
-                "enabled": False,
-                "recovery_blob_path": "data/recovery_blob.json",
-                "consumed_flag_path": "data/recovery_consumed.flag",
-            },
-        )
-
-        self.pending_recovery_generation = True
-        self.dashboard_update_signal.emit()
-        message = (
-            "Recovery reset complete. Please scan your fingerprint on the hardware key "
-            "to generate a new recovery key."
-        )
-        self.log(message)
-        QMessageBox.information(self, "Reset Recovery Key", message)
 
     def handle_serial_event(self, line):
         if line == "PONG":

@@ -48,7 +48,9 @@ class ConfigManager:
             self.save_config(default_config)
             return default_config
 
-        merged_config = _merge_defaults(default_config, loaded_config)
+        merged_config = _disable_developer_mode(
+            _merge_defaults(default_config, loaded_config)
+        )
         if merged_config != loaded_config:
             self.save_config(merged_config)
 
@@ -96,13 +98,6 @@ class ConfigManager:
         config[section] = existing_section
         return self.save_config(config)
 
-    def reset_setup_state_for_demo(self) -> dict[str, Any]:
-        config = self.load_config()
-        config["setup_completed"] = False
-        config["setup_step"] = "welcome"
-        return self.save_config(config)
-
-
 def get_default_config() -> dict[str, Any]:
     return {
         "app_version": "0.1.0",
@@ -138,8 +133,10 @@ def get_default_config() -> dict[str, Any]:
             "consumed_flag_path": "data/recovery_consumed.flag",
         },
         "developer_mode": {
-            "enabled": True,
-            "allow_recovery_reset_demo": True,
+            "enabled": False,
+            "allow_setup_reset": False,
+            "allow_recovery_reset": False,
+            "allow_recovery_reset_demo": False,
         },
     }
 
@@ -168,10 +165,6 @@ def update_section(section: str, values: Mapping[str, Any]) -> dict[str, Any]:
     return _default_manager().update_section(section, values)
 
 
-def reset_setup_state_for_demo() -> dict[str, Any]:
-    return _default_manager().reset_setup_state_for_demo()
-
-
 def _default_manager() -> ConfigManager:
     return ConfigManager()
 
@@ -193,6 +186,24 @@ def _merge_defaults(
             merged_config[key] = value
 
     return merged_config
+
+
+def _disable_developer_mode(config: dict[str, Any]) -> dict[str, Any]:
+    normalized_config = copy.deepcopy(config)
+    developer_mode = normalized_config.get("developer_mode")
+    if not isinstance(developer_mode, dict):
+        developer_mode = {}
+
+    developer_mode.update(
+        {
+            "enabled": False,
+            "allow_setup_reset": False,
+            "allow_recovery_reset": False,
+            "allow_recovery_reset_demo": False,
+        }
+    )
+    normalized_config["developer_mode"] = developer_mode
+    return normalized_config
 
 
 def _step_value(step: Any) -> str:
