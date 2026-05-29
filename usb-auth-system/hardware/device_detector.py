@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import time
 from pathlib import Path
 
@@ -10,15 +11,43 @@ KEY_DIR = PROJECT_ROOT / "keys"
 ED25519_PUBLIC_KEY_PATH = KEY_DIR / "esp_ed25519_public.bin"
 
 
-def load_expected_device_id() -> str:
-    if not ED25519_PUBLIC_KEY_PATH.exists():
-        raise FileNotFoundError(f"Missing key file: {ED25519_PUBLIC_KEY_PATH}")
+@dataclass
+class HardwareDetectionResult:
+    matched: bool = False
+    responded: bool = False
+    device_id: str = ""
+    port: str = ""
+    error: str = ""
 
-    return ED25519_PUBLIC_KEY_PATH.read_bytes().hex().upper()
+
+def load_expected_device_id(key_path: Path | str | None = None) -> str:
+    public_key_path = Path(key_path) if key_path else ED25519_PUBLIC_KEY_PATH
+    if not public_key_path.exists():
+        raise FileNotFoundError(f"Missing key file: {public_key_path}")
+
+    return public_key_path.read_bytes().hex().upper()
 
 
-def find_hardware_key(baudrate: int = 115200, timeout: float = 1.0) -> str | None:
-    expected_device_id = load_expected_device_id()
+def detect_trusted_hardware_key(
+    key_path: Path | str | None = None,
+    baudrate: int = 115200,
+    timeout: float = 1.0,
+) -> HardwareDetectionResult:
+    try:
+        expected_device_id = load_expected_device_id(key_path)
+    except (FileNotFoundError, OSError):
+        return HardwareDetectionResult(error="missing_trusted_key")
+
+    return scan_hardware_key(expected_device_id, baudrate=baudrate, timeout=timeout)
+
+
+def scan_hardware_key(
+    expected_device_id: str,
+    baudrate: int = 115200,
+    timeout: float = 1.0,
+) -> HardwareDetectionResult:
+    expected_device_id = expected_device_id.strip().upper()
+    first_response = HardwareDetectionResult()
 
     for port in list_ports.comports():
         ser = None
@@ -36,14 +65,15 @@ def find_hardware_key(baudrate: int = 115200, timeout: float = 1.0) -> str | Non
                 pass
 
             deadline = time.time() + 5.0
+            port_done = False
 
-            while time.time() < deadline:
+            while time.time() < deadline and not port_done:
                 ser.write(b"WHOAMI\n")
                 ser.flush()
 
                 read_until = time.time() + 0.7
 
-                while time.time() < read_until:
+                while time.time() < read_until and not port_done:
                     line = ser.readline().decode(errors="ignore").strip()
 
                     if not line:
@@ -51,17 +81,27 @@ def find_hardware_key(baudrate: int = 115200, timeout: float = 1.0) -> str | Non
 
                     if line.startswith("DEVICE_ID:"):
                         device_id = line.split(":", 1)[1].strip().upper()
+                        response = HardwareDetectionResult(
+                            matched=device_id == expected_device_id,
+                            responded=True,
+                            device_id=device_id,
+                            port=port.device,
+                        )
 
                         ser.close()
 
-                        if device_id == expected_device_id:
-                            return port.device
+                        if response.matched:
+                            return response
 
-                        break
+                        if not first_response.responded:
+                            first_response = response
+
+                        port_done = True
 
                 time.sleep(0.2)
 
-            ser.close()
+            if ser.is_open:
+                ser.close()
 
         except Exception:
             try:
@@ -70,4 +110,10 @@ def find_hardware_key(baudrate: int = 115200, timeout: float = 1.0) -> str | Non
             except Exception:
                 pass
 
-    return None
+    return first_response
+
+
+def find_hardware_key(baudrate: int = 115200, timeout: float = 1.0) -> str | None:
+    expected_device_id = load_expected_device_id()
+    result = scan_hardware_key(expected_device_id, baudrate=baudrate, timeout=timeout)
+    return result.port if result.matched else None

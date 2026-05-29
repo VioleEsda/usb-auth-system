@@ -7,7 +7,11 @@ from cryptography.exceptions import InvalidSignature, InvalidTag
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from PyQt6.QtCore import QTimer, pyqtSignal
+from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import (
+    QDialog,
+    QFrame,
+    QGridLayout,
     QWidget,
     QLabel,
     QPushButton,
@@ -23,24 +27,78 @@ from PyQt6.QtWidgets import (
 from hardware.serial_device import SerialDevice
 from container.veracrypt_controller import VeraCryptController
 from recovery.recovery_manager import RecoveryError, RecoveryManager
+from utils.config_manager import ConfigManager
+
+
+class LogDialog(QDialog):
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(720, 420)
+
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.close)
+
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        button_layout.addWidget(close_button)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.addWidget(self.log_text)
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+
+    def set_text(self, text: str):
+        self.log_text.setPlainText(text)
+        self.log_text.moveCursor(QTextCursor.MoveOperation.End)
+
+    def append_line(self, line: str):
+        self.log_text.append(line)
+
 
 class MainWindow(QWidget):
     log_signal = pyqtSignal(str)
     status_signal = pyqtSignal(str)
+    dashboard_update_signal = pyqtSignal()
     recovery_key_generated_signal = pyqtSignal(str)
     recovery_generation_failed_signal = pyqtSignal(str)
 
-    def __init__(self):
+    def __init__(self, config_manager=None):
         super().__init__()
 
-        self.device = SerialDevice(baudrate=115200)
-        self.veracrypt = VeraCryptController()
+        self.config_manager = config_manager or ConfigManager()
+        self.config = self.config_manager.load_config()
         self.project_root = Path(__file__).resolve().parents[1]
-        self.recovery_manager = RecoveryManager(self.project_root)
         self.keys_dir = self.project_root / "keys"
-        self.ed25519_public_key_path = self.keys_dir / "esp_ed25519_public.bin"
-        self.x25519_public_key_path = self.keys_dir / "esp_x25519_public.bin"
-        self.container_path = r"C:\PA\usb-auth-system\demo_container.hc"
+
+        self.device = SerialDevice(baudrate=115200)
+        self.veracrypt = VeraCryptController(
+            exe_path=self._config_value("veracrypt", "executable_path") or None
+        )
+        self.recovery_manager = RecoveryManager(self.project_root)
+        self.ed25519_public_key_path = self._config_path(
+            self._config_value("hardware", "ed25519_public_key_path"),
+            self.keys_dir / "esp_ed25519_public.bin",
+        )
+        self.x25519_public_key_path = self._config_path(
+            self._config_value("hardware", "x25519_public_key_path"),
+            self.keys_dir / "esp_x25519_public.bin",
+        )
+        self.container_path = str(
+            self._config_path(
+                self._config_value("workspace", "container_path"),
+                self.project_root / "demo_container.hc",
+            )
+        )
+        self.mount_letter = str(
+            self._config_value("workspace", "mount_letter") or "X"
+        ).strip().rstrip(":") or "X"
+        self.veracrypt.container_path = self.container_path
+        self.veracrypt.mount_letter = self.mount_letter
         self.last_auth_time = 0
         self.cooldown = 3  # detik anti spam
         self.mounted = False
@@ -58,12 +116,14 @@ class MainWindow(QWidget):
         self.heartbeat_fail_limit = 2
         self.heartbeat_active_logged = False
         self.heartbeat_lost_logged = False
+        self.log_dialog = None
 
         # Kalau mau balik ke mock device:
         # self.device = MockDevice()
 
         self.setWindowTitle("USB Hardware Key Security Manager")
-        self.setGeometry(200, 200, 520, 360)
+        self.setMinimumSize(880, 520)
+        self.resize(960, 580)
 
         self.init_ui()
         self.initialize_device()
@@ -74,36 +134,442 @@ class MainWindow(QWidget):
         self.heartbeat_timer.start(3000)  # cek tiap 3 detik
         self.check_device_heartbeat()
 
+    def _config_value(self, section: str, key: str):
+        section_values = self.config.get(section, {})
+        if not isinstance(section_values, dict):
+            return None
+
+        value = section_values.get(key)
+        if isinstance(value, str):
+            return value.strip()
+
+        return value
+
+    def _config_path(self, value, default_path: Path) -> Path:
+        return self._config_runtime_path(value, default_path)
+
+    def _config_runtime_path(self, value, default_path: Path) -> Path:
+        if not value:
+            return default_path
+
+        path = Path(value)
+        if path.is_absolute():
+            return path
+
+        return self.project_root / path
+
     def init_ui(self):
-        self.status_label = QLabel("USB Hardware Key Status: Not Connected")
+        self.setStyleSheet(
+            """
+            QWidget {
+                background: #f3f6fb;
+                color: #111827;
+                font-size: 13px;
+            }
+            QLabel {
+                background: transparent;
+            }
+            QLabel#AppTitle {
+                background: transparent;
+                color: #111827;
+                font-size: 26px;
+                font-weight: 700;
+            }
+            QLabel#Subtitle {
+                background: transparent;
+                color: #64748b;
+                font-size: 13px;
+            }
+            QLabel#SectionLabel {
+                background: transparent;
+                color: #111827;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QFrame#StatusBanner,
+            QFrame#DashboardCard,
+            QFrame#ActionCard,
+            QFrame#AdvancedCard,
+            QFrame#DeveloperCard {
+                background: #ffffff;
+                border: 1px solid #d9e2ec;
+                border-radius: 12px;
+            }
+            QFrame#StatusBanner {
+                background: #eff6ff;
+                border-color: #bfdbfe;
+            }
+            QFrame#DeveloperCard {
+                background: #f8fafc;
+            }
+            QLabel#StatusLabel {
+                background: transparent;
+                color: #111827;
+                font-weight: 600;
+            }
+            QLabel#CardTitle {
+                background: transparent;
+                color: #64748b;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QLabel#CardValue {
+                background: transparent;
+                color: #111827;
+                font-size: 20px;
+                font-weight: 700;
+            }
+            QLabel#CardValue[state="ok"] {
+                color: #166534;
+            }
+            QLabel#CardValue[state="warn"] {
+                color: #92400e;
+            }
+            QLabel#CardValue[state="muted"] {
+                color: #64748b;
+            }
+            QTextEdit {
+                background: #ffffff;
+                border: 1px solid #d9e2ec;
+                border-radius: 8px;
+                color: #111827;
+                font-family: Consolas, "Courier New", monospace;
+                padding: 8px;
+            }
+            QPushButton {
+                background: #ffffff;
+                border: 1px solid #d9e2ec;
+                border-radius: 8px;
+                color: #111827;
+                padding: 10px 14px;
+            }
+            QPushButton:hover {
+                background: #f8fafc;
+            }
+            QPushButton:disabled {
+                background: #eef2f7;
+                border-color: #d9e2ec;
+                color: #94a3b8;
+            }
+            QPushButton#PrimaryButton {
+                background: #2563eb;
+                border-color: #2563eb;
+                color: #ffffff;
+                font-weight: 600;
+            }
+            QPushButton#PrimaryButton:hover:!disabled {
+                background: #1d4ed8;
+            }
+            QPushButton#PrimaryButton:disabled {
+                background: #e5e7eb;
+                border-color: #d1d5db;
+                color: #94a3b8;
+                font-weight: 600;
+            }
+            QPushButton#SecondaryButton {
+                background: #ffffff;
+                border-color: #cbd5e1;
+                color: #111827;
+            }
+            QPushButton#SecondaryButton:hover {
+                background: #eaf1fb;
+                border-color: #94a3b8;
+            }
+            QPushButton#SecondaryButton:disabled {
+                background: #eef2f7;
+                border-color: #d9e2ec;
+                color: #94a3b8;
+            }
+            QPushButton#DangerButton {
+                border-color: #fecaca;
+                color: #991b1b;
+            }
+            """
+        )
+
+        self.title_label = QLabel("USB Auth Workspace")
+        self.title_label.setObjectName("AppTitle")
+
+        self.subtitle_label = QLabel(
+            "Unlock and manage your encrypted VeraCrypt workspace using your trusted USB hardware key."
+        )
+        self.subtitle_label.setObjectName("Subtitle")
+        self.subtitle_label.setWordWrap(True)
+
+        self.status_label = QLabel("Hardware key: Not connected")
+        self.status_label.setObjectName("StatusLabel")
+        self.status_label.setWordWrap(True)
+
+        status_banner = QFrame()
+        status_banner.setObjectName("StatusBanner")
+        status_banner_layout = QVBoxLayout(status_banner)
+        status_banner_layout.setContentsMargins(16, 13, 16, 13)
+        status_banner_layout.addWidget(self.status_label)
+
+        self.hardware_card, self.hardware_value_label = self._create_status_card(
+            "Hardware Key",
+            "Not connected",
+        )
+        self.workspace_card, self.workspace_value_label = self._create_status_card(
+            "Workspace",
+            "Unknown",
+        )
+        self.recovery_card, self.recovery_value_label = self._create_status_card(
+            "Recovery",
+            "Not configured",
+        )
 
         self.unlock_button = QPushButton("Unlock Workspace")
+        self.unlock_button.setObjectName("PrimaryButton")
         self.unmount_button = QPushButton("Unmount Workspace")
+        self.unmount_button.setObjectName("SecondaryButton")
         self.recovery_button = QPushButton("Recovery Mode")
+        self.recovery_button.setObjectName("SecondaryButton")
+        self.view_log_button = QPushButton("View Technical Log")
+        self.view_log_button.setObjectName("SecondaryButton")
+        self.reset_setup_button = None
+        self.reset_recovery_button = None
+
+        if self._developer_mode_enabled():
+            self.reset_setup_button = QPushButton("Reset Setup Wizard")
+            self.reset_setup_button.setObjectName("SecondaryButton")
+
+        if self._developer_recovery_reset_enabled():
+            self.reset_recovery_button = QPushButton("Reset Recovery Key")
 
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
+        self.log_area.setPlaceholderText("Technical details and security events appear here.")
 
-        button_layout = QHBoxLayout()
-        button_layout.addWidget(self.unlock_button)
-        button_layout.addWidget(self.unmount_button)
-        button_layout.addWidget(self.recovery_button)
+        actions_label = QLabel("Actions")
+        actions_label.setObjectName("SectionLabel")
+
+        actions_frame = QFrame()
+        actions_frame.setObjectName("ActionCard")
+        actions_layout = QVBoxLayout(actions_frame)
+        actions_layout.setContentsMargins(16, 14, 16, 16)
+        actions_layout.setSpacing(10)
+        actions_layout.addWidget(actions_label)
+
+        primary_button_layout = QHBoxLayout()
+        primary_button_layout.setSpacing(8)
+        primary_button_layout.addWidget(self.unlock_button)
+        primary_button_layout.addWidget(self.unmount_button)
+        primary_button_layout.addWidget(self.recovery_button)
+        primary_button_layout.addStretch()
+        actions_layout.addLayout(primary_button_layout)
+
+        advanced_label = QLabel("Advanced")
+        advanced_label.setObjectName("SectionLabel")
+
+        advanced_frame = QFrame()
+        advanced_frame.setObjectName("AdvancedCard")
+        advanced_layout = QHBoxLayout(advanced_frame)
+        advanced_layout.setContentsMargins(16, 14, 16, 14)
+        advanced_layout.setSpacing(10)
+        advanced_layout.addWidget(advanced_label)
+        advanced_layout.addStretch()
+        advanced_layout.addWidget(self.view_log_button)
+
+        developer_label = QLabel("Developer/Test")
+        developer_label.setObjectName("SectionLabel")
+
+        developer_frame = QFrame()
+        developer_frame.setObjectName("DeveloperCard")
+        developer_layout = QVBoxLayout(developer_frame)
+        developer_layout.setContentsMargins(16, 14, 16, 16)
+        developer_layout.setSpacing(10)
+        developer_layout.addWidget(developer_label)
+
+        developer_button_layout = QHBoxLayout()
+        developer_button_layout.setSpacing(8)
+        if self.reset_setup_button is not None:
+            developer_button_layout.addWidget(self.reset_setup_button)
+        if self.reset_recovery_button is not None:
+            self.reset_recovery_button.setObjectName("DangerButton")
+            developer_button_layout.addWidget(self.reset_recovery_button)
+        developer_button_layout.addStretch()
+        developer_layout.addLayout(developer_button_layout)
+
+        show_developer_actions = (
+            self.reset_setup_button is not None
+            or self.reset_recovery_button is not None
+        )
+
+        cards_grid = QGridLayout()
+        cards_grid.setSpacing(12)
+        cards_grid.addWidget(self.hardware_card, 0, 0)
+        cards_grid.addWidget(self.workspace_card, 0, 1)
+        cards_grid.addWidget(self.recovery_card, 0, 2)
+        cards_grid.setColumnStretch(0, 1)
+        cards_grid.setColumnStretch(1, 1)
+        cards_grid.setColumnStretch(2, 1)
 
         layout = QVBoxLayout()
-        layout.addWidget(self.status_label)
-        layout.addLayout(button_layout)
-        layout.addWidget(QLabel("System Log"))
-        layout.addWidget(self.log_area)
+        layout.setContentsMargins(30, 26, 30, 24)
+        layout.setSpacing(14)
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.subtitle_label)
+        layout.addWidget(status_banner)
+        layout.addLayout(cards_grid)
+        layout.addWidget(actions_frame)
+        layout.addWidget(advanced_frame)
+        if show_developer_actions:
+            layout.addWidget(developer_frame)
+        layout.addStretch()
 
         self.setLayout(layout)
 
-        self.log_signal.connect(self.log_area.append)
-        self.status_signal.connect(self.status_label.setText)
+        self.log_signal.connect(self._append_log_message)
+        self.status_signal.connect(self._handle_status_message)
+        self.dashboard_update_signal.connect(self.update_dashboard_cards)
         self.recovery_key_generated_signal.connect(self.show_generated_recovery_key)
         self.recovery_generation_failed_signal.connect(self.show_recovery_generation_error)
         self.unlock_button.clicked.connect(self.unlock_workspace)
         self.unmount_button.clicked.connect(self.unmount_workspace)
         self.recovery_button.clicked.connect(self.recovery_mode)
+        self.view_log_button.clicked.connect(self.open_log_dialog)
+        if self.reset_setup_button is not None:
+            self.reset_setup_button.clicked.connect(self.reset_setup_wizard)
+        if self.reset_recovery_button is not None:
+            self.reset_recovery_button.clicked.connect(self.reset_recovery_key_for_demo)
+
+        self.update_dashboard_cards()
+
+    def _create_status_card(self, title: str, value: str):
+        frame = QFrame()
+        frame.setObjectName("DashboardCard")
+
+        title_label = QLabel(title)
+        title_label.setObjectName("CardTitle")
+
+        value_label = QLabel(value)
+        value_label.setObjectName("CardValue")
+        value_label.setWordWrap(True)
+
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(8)
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        layout.addStretch()
+
+        return frame, value_label
+
+    def _append_log_message(self, message: str):
+        self.log_area.append(message)
+        if self.log_dialog is not None and self.log_dialog.isVisible():
+            self.log_dialog.append_line(message)
+
+    def _handle_status_message(self, message: str):
+        self.status_label.setText(message)
+        self.update_dashboard_cards()
+
+    def open_log_dialog(self):
+        if self.log_dialog is None or not self.log_dialog.isVisible():
+            self.log_dialog = LogDialog("Technical Log", self)
+            self.log_dialog.finished.connect(self._clear_log_dialog_reference)
+
+        self.log_dialog.set_text(self.log_area.toPlainText())
+        self.log_dialog.show()
+        self.log_dialog.raise_()
+        self.log_dialog.activateWindow()
+
+    def _clear_log_dialog_reference(self):
+        self.log_dialog = None
+
+    def _set_dashboard_value(self, label: QLabel, text: str, state: str):
+        label.setText(text)
+        label.setProperty("state", state)
+        label.style().unpolish(label)
+        label.style().polish(label)
+
+    def update_dashboard_cards(self):
+        if not hasattr(self, "hardware_value_label"):
+            return
+
+        hardware_text = "Not connected"
+        hardware_state = "muted"
+        if self.device and self.device.is_connected():
+            hardware_text = "Ready"
+            hardware_state = "ok"
+            if self.unlock_in_progress or self.recovery_generation_in_progress:
+                hardware_text = "Connected"
+                hardware_state = "warn"
+
+        workspace_text = "Unknown"
+        workspace_state = "muted"
+        if self.mounted_via_recovery:
+            workspace_text = "Mounted via Recovery"
+            workspace_state = "warn"
+        elif self.mounted:
+            workspace_text = "Mounted"
+            workspace_state = "ok"
+        else:
+            workspace_config = self.config.get("workspace", {})
+            if not isinstance(workspace_config, dict):
+                workspace_config = {}
+
+            try:
+                container_exists = Path(self.container_path).exists()
+            except OSError:
+                container_exists = False
+
+            if workspace_config.get("container_created") is True or container_exists:
+                workspace_text = "Locked"
+                workspace_state = "muted"
+
+        recovery_text = "Not configured"
+        recovery_state = "muted"
+        if self.pending_recovery_generation or self.recovery_generation_in_progress:
+            recovery_text = "Pending"
+            recovery_state = "warn"
+        else:
+            try:
+                recovery_status = self.recovery_manager.get_recovery_status()
+            except Exception:
+                recovery_status = "unknown"
+
+            if recovery_status == "active":
+                recovery_text = "Available"
+                recovery_state = "ok"
+            elif recovery_status == "consumed":
+                recovery_text = "Used"
+                recovery_state = "warn"
+            elif recovery_status == "not_created":
+                recovery_text = "Not configured"
+                recovery_state = "muted"
+            else:
+                recovery_text = "Unknown"
+                recovery_state = "muted"
+
+        self._set_dashboard_value(
+            self.hardware_value_label,
+            hardware_text,
+            hardware_state,
+        )
+        self._set_dashboard_value(
+            self.workspace_value_label,
+            workspace_text,
+            workspace_state,
+        )
+        self._set_dashboard_value(
+            self.recovery_value_label,
+            recovery_text,
+            recovery_state,
+        )
+
+    def _developer_mode_enabled(self) -> bool:
+        developer_mode = self.config.get("developer_mode", {})
+        return isinstance(developer_mode, dict) and bool(developer_mode.get("enabled"))
+
+    def _developer_recovery_reset_enabled(self) -> bool:
+        developer_mode = self.config.get("developer_mode", {})
+        return (
+            isinstance(developer_mode, dict)
+            and bool(developer_mode.get("enabled"))
+            and bool(developer_mode.get("allow_recovery_reset_demo"))
+        )
 
     def log(self, message: str):
         self.log_signal.emit(message)
@@ -111,16 +577,139 @@ class MainWindow(QWidget):
     def initialize_device(self):
         if self.device.connect():
             self.device.set_callback(self.handle_serial_event)
-            self.status_signal.emit("USB Hardware Key Status: Connected (Serial Device)")
+            self.status_signal.emit("Hardware key: Connected and ready")
             self.log("Serial device connected. Waiting for fingerprint match events.")
         else:
+            self.status_signal.emit("Hardware key: Not connected")
             self.log("Failed to connect device.")
 
     def check_veracrypt(self):
-        if self.veracrypt.is_installed():
+        installed = self.veracrypt.is_installed()
+        values = {"installed": installed}
+        if self.veracrypt.exe_path:
+            values["executable_path"] = str(self.veracrypt.exe_path)
+
+        self.config = self.config_manager.update_section("veracrypt", values)
+
+        if installed:
             self.log("VeraCrypt detected successfully.")
         else:
             self.log("VeraCrypt not detected. Please install VeraCrypt first.")
+
+    def reset_setup_wizard(self):
+        response = QMessageBox.question(
+            self,
+            "Reset Setup Wizard",
+            (
+                "Reset setup state so the Setup Wizard opens on the next app start?\n\n"
+                "This will not delete keys, recovery blobs, containers, or .env."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+
+        self.config = self.config_manager.reset_setup_state_for_demo()
+        QMessageBox.information(
+            self,
+            "Setup Wizard Reset",
+            "Setup state was reset. Restart the app to open Setup Wizard again.",
+        )
+
+    def reset_recovery_key_for_demo(self):
+        self.config = self.config_manager.load_config()
+        if not self._developer_recovery_reset_enabled():
+            QMessageBox.warning(
+                self,
+                "Reset Recovery Key",
+                "Developer/Test Mode recovery reset is not enabled.",
+            )
+            return
+
+        response = QMessageBox.question(
+            self,
+            "Reset Recovery Key",
+            (
+                "This is a Developer/Test Mode action. It will invalidate the current "
+                "local recovery state and allow generating a new recovery key for "
+                "demo/testing. It will not delete the workspace container or change "
+                "the hardware key password. Continue?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+
+        if self.pending_recovery_generation or self.recovery_generation_in_progress:
+            QMessageBox.information(
+                self,
+                "Reset Recovery Key",
+                "Recovery generation is already pending or in progress.",
+            )
+            return
+
+        if self.unlock_in_progress:
+            QMessageBox.information(
+                self,
+                "Reset Recovery Key",
+                "Secure unlock is currently in progress. Try again after it finishes.",
+            )
+            return
+
+        if not self.device or not self.device.is_connected():
+            QMessageBox.information(
+                self,
+                "Reset Recovery Key",
+                "Hardware key is not connected. Connect the hardware key before resetting recovery.",
+            )
+            return
+
+        recovery_config = self.config.get("recovery", {})
+        if not isinstance(recovery_config, dict):
+            recovery_config = {}
+
+        blob_path = self._config_runtime_path(
+            recovery_config.get("recovery_blob_path"),
+            self.project_root / "data" / "recovery_blob.json",
+        )
+        consumed_flag_path = self._config_runtime_path(
+            recovery_config.get("consumed_flag_path"),
+            self.project_root / "data" / "recovery_consumed.flag",
+        )
+
+        try:
+            for path in (blob_path, consumed_flag_path):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+        except OSError as e:
+            QMessageBox.warning(
+                self,
+                "Reset Recovery Key",
+                f"Failed to reset local recovery state:\n{e}",
+            )
+            return
+
+        self.config = self.config_manager.update_section(
+            "recovery",
+            {
+                "enabled": False,
+                "recovery_blob_path": "data/recovery_blob.json",
+                "consumed_flag_path": "data/recovery_consumed.flag",
+            },
+        )
+
+        self.pending_recovery_generation = True
+        self.dashboard_update_signal.emit()
+        message = (
+            "Recovery reset complete. Please scan your fingerprint on the hardware key "
+            "to generate a new recovery key."
+        )
+        self.log(message)
+        QMessageBox.information(self, "Reset Recovery Key", message)
 
     def handle_serial_event(self, line):
         if line == "PONG":
@@ -169,6 +758,7 @@ class MainWindow(QWidget):
             self.unlock_in_progress = True
             self.last_auth_time = time.time()
 
+        self.dashboard_update_signal.emit()
         worker = threading.Thread(
             target=self.secure_unlock_worker,
             args=(user_id, confidence),
@@ -190,6 +780,7 @@ class MainWindow(QWidget):
                 self.log("Cannot mount: password unavailable.")
                 return
 
+            self.status_signal.emit("Unlocking workspace")
             self.log("Mounting encrypted container...")
             success, message = self.veracrypt.mount_container(password)
             self.log(message)
@@ -197,13 +788,16 @@ class MainWindow(QWidget):
             if success:
                 self.mounted = True
                 self.mounted_via_recovery = False
+                self.status_signal.emit("Workspace mounted")
                 self.log("Container mounted securely.")
             else:
+                self.status_signal.emit("Workspace unlock failed")
                 self.log("Workspace unlock failed.")
         finally:
             password = None
             with self.unlock_lock:
                 self.unlock_in_progress = False
+            self.dashboard_update_signal.emit()
 
     def wait_for_heartbeat_idle(self):
         while True:
@@ -330,9 +924,11 @@ class MainWindow(QWidget):
         self.log("Unlock workspace requested.")
 
         if not self.device.is_connected():
+            self.status_signal.emit("Hardware key: Not connected")
             self.log("No hardware key connected.")
             return
 
+        self.status_signal.emit("Waiting for fingerprint authorization")
         self.log("Waiting for MATCH_READY from the hardware key fingerprint scan.")
 
     def recovery_mode(self):
@@ -377,6 +973,7 @@ class MainWindow(QWidget):
             return
 
         self.pending_recovery_generation = True
+        self.dashboard_update_signal.emit()
         self.log("Recovery setup pending. Please scan fingerprint on hardware key.")
 
     def handle_recovery_generation_match(self, user_id, confidence):
@@ -387,6 +984,7 @@ class MainWindow(QWidget):
 
             self.recovery_generation_in_progress = True
 
+        self.dashboard_update_signal.emit()
         worker = threading.Thread(
             target=self.recovery_generation_worker,
             args=(user_id, confidence),
@@ -416,6 +1014,14 @@ class MainWindow(QWidget):
                 return
 
             recovery_key = self.recovery_manager.create_recovery_blob(password)
+            self.config = self.config_manager.update_section(
+                "recovery",
+                {
+                    "enabled": True,
+                    "recovery_blob_path": "data/recovery_blob.json",
+                    "consumed_flag_path": "data/recovery_consumed.flag",
+                },
+            )
         except RecoveryError as e:
             self.log(f"Recovery key generation failed: {e}")
             self.recovery_generation_failed_signal.emit(f"Recovery key generation failed:\n{e}")
@@ -429,6 +1035,7 @@ class MainWindow(QWidget):
             self.pending_recovery_generation = False
             with self.recovery_generation_lock:
                 self.recovery_generation_in_progress = False
+            self.dashboard_update_signal.emit()
 
         self.log("Recovery key generated. Please store it safely.")
         self.recovery_key_generated_signal.emit(recovery_key)
@@ -480,8 +1087,10 @@ class MainWindow(QWidget):
             if success:
                 self.mounted = True
                 self.mounted_via_recovery = True
+                self.status_signal.emit("Workspace mounted with recovery key")
                 self.log("Container mounted securely.")
             else:
+                self.status_signal.emit("Workspace unlock failed")
                 self.log("Workspace unlock failed.")
         finally:
             password = None
@@ -495,6 +1104,7 @@ class MainWindow(QWidget):
         if success:
             self.mounted = False
             self.mounted_via_recovery = False
+            self.status_signal.emit("Workspace unmounted")
 
     def closeEvent(self, event):
         try:
@@ -566,7 +1176,7 @@ class MainWindow(QWidget):
             self.device_lost_handled = True
 
         self.heartbeat_fail_count = 0
-        self.status_signal.emit("USB Hardware Key Status: Not Connected")
+        self.status_signal.emit("Hardware key: Not connected")
 
         try:
             if self.device:
@@ -575,6 +1185,7 @@ class MainWindow(QWidget):
             pass
 
         self.pending_recovery_generation = False
+        self.dashboard_update_signal.emit()
 
         if self.mounted and self.mounted_via_recovery:
             self.log("Hardware key disconnected.")
@@ -593,6 +1204,7 @@ class MainWindow(QWidget):
 
             self.mounted = False
             self.mounted_via_recovery = False
+            self.dashboard_update_signal.emit()
             return
 
         self.log("Hardware key disconnected.")
