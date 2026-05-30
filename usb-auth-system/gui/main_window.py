@@ -28,6 +28,7 @@ from hardware.serial_device import SerialDevice
 from container.veracrypt_controller import VeraCryptController
 from recovery.recovery_manager import RecoveryError, RecoveryManager
 from utils.config_manager import ConfigManager
+from utils.runtime_paths import resolve_app_path
 
 
 class LogDialog(QDialog):
@@ -73,20 +74,19 @@ class MainWindow(QWidget):
         self.config_manager = config_manager or ConfigManager()
         self.config = self.config_manager.load_config()
         self.project_root = Path(__file__).resolve().parents[1]
-        self.keys_dir = self.project_root / "keys"
 
         self.device = SerialDevice(baudrate=115200)
         self.veracrypt = VeraCryptController(
             exe_path=self._config_value("veracrypt", "executable_path") or None
         )
         self.recovery_manager = RecoveryManager(self.project_root)
-        self.ed25519_public_key_path = self._config_path(
+        self.ed25519_public_key_path = self._config_app_path(
             self._config_value("hardware", "ed25519_public_key_path"),
-            self.keys_dir / "esp_ed25519_public.bin",
+            "keys/esp_ed25519_public.bin",
         )
-        self.x25519_public_key_path = self._config_path(
+        self.x25519_public_key_path = self._config_app_path(
             self._config_value("hardware", "x25519_public_key_path"),
-            self.keys_dir / "esp_x25519_public.bin",
+            "keys/esp_x25519_public.bin",
         )
         self.container_path = str(
             self._config_path(
@@ -157,6 +157,18 @@ class MainWindow(QWidget):
             return path
 
         return self.project_root / path
+
+    def _config_app_path(self, value, default_path: str | Path) -> Path:
+        if isinstance(value, str):
+            value = value.strip()
+
+        if not value:
+            return resolve_app_path(default_path)
+
+        try:
+            return resolve_app_path(value)
+        except TypeError:
+            return resolve_app_path(default_path)
 
     def init_ui(self):
         self.setStyleSheet(

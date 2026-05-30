@@ -5,10 +5,9 @@ from pathlib import Path
 import serial
 from serial.tools import list_ports
 
+from utils.runtime_paths import resolve_app_path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-KEY_DIR = PROJECT_ROOT / "keys"
-ED25519_PUBLIC_KEY_PATH = KEY_DIR / "esp_ed25519_public.bin"
+ED25519_PUBLIC_KEY_PATH = resolve_app_path("keys/esp_ed25519_public.bin")
 
 
 @dataclass
@@ -21,11 +20,19 @@ class HardwareDetectionResult:
 
 
 def load_expected_device_id(key_path: Path | str | None = None) -> str:
-    public_key_path = Path(key_path) if key_path else ED25519_PUBLIC_KEY_PATH
+    public_key_path = (
+        resolve_app_path(key_path) if key_path else ED25519_PUBLIC_KEY_PATH
+    )
     if not public_key_path.exists():
         raise FileNotFoundError(f"Missing key file: {public_key_path}")
 
-    return public_key_path.read_bytes().hex().upper()
+    public_key_bytes = public_key_path.read_bytes()
+    if len(public_key_bytes) != 32:
+        raise ValueError(
+            f"Invalid key file length: expected 32 bytes, got {len(public_key_bytes)} bytes"
+        )
+
+    return public_key_bytes.hex().upper()
 
 
 def detect_trusted_hardware_key(
@@ -37,6 +44,8 @@ def detect_trusted_hardware_key(
         expected_device_id = load_expected_device_id(key_path)
     except (FileNotFoundError, OSError):
         return HardwareDetectionResult(error="missing_trusted_key")
+    except ValueError:
+        return HardwareDetectionResult(error="invalid_trusted_key")
 
     return scan_hardware_key(expected_device_id, baudrate=baudrate, timeout=timeout)
 

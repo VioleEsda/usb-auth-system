@@ -29,6 +29,7 @@ from container.veracrypt_controller import VeraCryptController
 from gui.main_window import MainWindow
 from hardware.device_detector import detect_trusted_hardware_key
 from recovery.recovery_manager import RecoveryError, RecoveryManager
+from utils.runtime_paths import resolve_app_path
 from .setup_state import SetupStep
 
 
@@ -1086,9 +1087,13 @@ class SetupWizardWindow(QWidget):
         if not isinstance(hardware_config, dict):
             hardware_config = {}
 
-        key_path = self._config_path(
+        key_path = self._config_app_path(
             hardware_config.get("ed25519_public_key_path"),
-            self.project_root / "keys" / "esp_ed25519_public.bin",
+            "keys/esp_ed25519_public.bin",
+        )
+        self._clear_detail_log()
+        self._append_detail_log(
+            f"Looking for trusted Ed25519 public key at: {key_path}"
         )
         result = detect_trusted_hardware_key(key_path=key_path)
 
@@ -1119,6 +1124,10 @@ class SetupWizardWindow(QWidget):
             if result.error == "missing_trusted_key":
                 self._set_status_error(
                     "Trusted public key file is missing. Cannot bind hardware key."
+                )
+            elif result.error == "invalid_trusted_key":
+                self._set_status_error(
+                    "Trusted public key file is invalid. Cannot bind hardware key."
                 )
             elif result.responded:
                 self._set_status_error(
@@ -1533,6 +1542,7 @@ class SetupWizardWindow(QWidget):
             self.update_button_states()
             return
 
+        self._clear_detail_log()
         esp_x25519_public_key_bytes = self._load_esp_x25519_public_key_bytes(
             hardware_config
         )
@@ -1552,7 +1562,6 @@ class SetupWizardWindow(QWidget):
 
         self.secret_provisioned = False
         self.secret_provision_in_progress = True
-        self._clear_detail_log()
         self._set_status_loading("Waiting for fingerprint authorization...")
         self.update_button_states()
 
@@ -1564,9 +1573,12 @@ class SetupWizardWindow(QWidget):
         worker.start()
 
     def _load_esp_x25519_public_key_bytes(self, hardware_config: dict) -> bytes | None:
-        key_path = self._config_path(
+        key_path = self._config_app_path(
             hardware_config.get("x25519_public_key_path"),
-            self.project_root / "keys" / "esp_x25519_public.bin",
+            "keys/esp_x25519_public.bin",
+        )
+        self._append_detail_log(
+            f"Looking for trusted X25519 public key at: {key_path}"
         )
 
         try:
@@ -2115,6 +2127,18 @@ class SetupWizardWindow(QWidget):
             return path
 
         return self.project_root / path
+
+    def _config_app_path(self, value, default_path: str | Path) -> Path:
+        if isinstance(value, str):
+            value = value.strip()
+
+        if not value:
+            return resolve_app_path(default_path)
+
+        try:
+            return resolve_app_path(value)
+        except TypeError:
+            return resolve_app_path(default_path)
 
     def _get_setup_validation_status(self) -> tuple[bool, list[str], list[str]]:
         config = self.config_manager.load_config()
