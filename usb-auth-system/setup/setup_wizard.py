@@ -27,7 +27,10 @@ from PyQt6.QtWidgets import (
 
 from container.veracrypt_controller import VeraCryptController
 from gui.main_window import MainWindow
-from hardware.device_detector import detect_trusted_hardware_key
+from hardware.device_detector import (
+    HardwareDetectionResult,
+    detect_trusted_hardware_key,
+)
 from recovery.recovery_manager import RecoveryError, RecoveryManager
 from utils.runtime_paths import resolve_app_path
 from .setup_state import SetupStep
@@ -117,6 +120,8 @@ class SetupWizardWindow(QWidget):
     provision_log_signal = pyqtSignal(str)
     provision_status_signal = pyqtSignal(str, str)
     provision_finished_signal = pyqtSignal(bool, str)
+    hardware_check_finished_signal = pyqtSignal(object)
+    recovery_log_signal = pyqtSignal(str)
     recovery_finished_signal = pyqtSignal(bool, str, str)
 
     def __init__(self, config_manager):
@@ -128,14 +133,15 @@ class SetupWizardWindow(QWidget):
         self.main_window = None
         self.veracrypt_installed = None
         self.hardware_bound = None
+        self.hardware_check_in_progress = False
         self.fingerprint_enrolled = None
         self.enroll_in_progress = False
         self.enroll_fingerprint_id = "1"
-        self.project_root = Path(__file__).resolve().parents[1]
+        self.project_root = resolve_app_path(".").resolve()
         self.workspace_created = None
         self.workspace_creation_in_progress = False
         self.generated_workspace_password = None
-        self.selected_workspace_path = str(self.project_root / "data" / "workspace.hc")
+        self.selected_workspace_path = str(resolve_app_path("data/workspace.hc"))
         self.secret_provisioned = None
         self.secret_provision_in_progress = False
         self.recovery_setup_done = None
@@ -456,6 +462,10 @@ class SetupWizardWindow(QWidget):
         self.provision_log_signal.connect(self.append_provision_log)
         self.provision_status_signal.connect(self.handle_provision_status)
         self.provision_finished_signal.connect(self.handle_secret_provision_finished)
+        self.hardware_check_finished_signal.connect(
+            self.handle_hardware_check_finished
+        )
+        self.recovery_log_signal.connect(self._append_detail_log)
         self.recovery_finished_signal.connect(self.handle_recovery_setup_finished)
 
         workspace_size_layout = QHBoxLayout()
@@ -803,6 +813,7 @@ class SetupWizardWindow(QWidget):
         self._clear_finish_checklist()
         self.finish_checklist_frame.setVisible(False)
         details_visible = current_step in (
+            SetupStep.detect_hardware,
             SetupStep.enroll_fingerprint,
             SetupStep.provision_secret,
             SetupStep.setup_recovery,
@@ -896,6 +907,13 @@ class SetupWizardWindow(QWidget):
         ):
             can_go_next = False
 
+        hardware_check_active = (
+            current_step == SetupStep.detect_hardware
+            and self.hardware_check_in_progress
+        )
+        if hardware_check_active:
+            can_go_next = False
+
         if (
             current_step == SetupStep.enroll_fingerprint
             and self.fingerprint_enrolled is not True
@@ -927,7 +945,7 @@ class SetupWizardWindow(QWidget):
             finish_enabled = self._get_setup_validation_status()[0]
 
         self.finish_button.setEnabled(is_last_step and finish_enabled)
-        self.recheck_button.setEnabled(True)
+        self.recheck_button.setEnabled(not hardware_check_active)
         self.choose_veracrypt_button.setEnabled(True)
         self.start_enroll_button.setEnabled(not self.enroll_in_progress)
         workspace_controls_enabled = not self.workspace_creation_in_progress
@@ -1082,6 +1100,9 @@ class SetupWizardWindow(QWidget):
         self.update_button_states()
 
     def check_hardware_status(self):
+        if self.hardware_check_in_progress:
+            return
+
         config = self.config_manager.load_config()
         hardware_config = config.get("hardware", {})
         if not isinstance(hardware_config, dict):
@@ -1095,7 +1116,51 @@ class SetupWizardWindow(QWidget):
         self._append_detail_log(
             f"Looking for trusted Ed25519 public key at: {key_path}"
         )
-        result = detect_trusted_hardware_key(key_path=key_path)
+        self.hardware_bound = False
+        self.hardware_check_in_progress = True
+        self._set_status_loading(
+            "Checking hardware key. Please keep the device connected..."
+        )
+        self.update_button_states()
+
+        worker = threading.Thread(
+            target=self._hardware_check_worker,
+            args=(key_path,),
+            daemon=True,
+        )
+        worker.start()
+
+    def _hardware_check_worker(self, key_path: Path):
+        try:
+            result = detect_trusted_hardware_key(key_path=key_path)
+        except Exception:
+            result = HardwareDetectionResult(error="hardware_check_failed")
+
+        self.hardware_check_finished_signal.emit(result)
+
+    def handle_hardware_check_finished(self, result: HardwareDetectionResult):
+        self.hardware_check_in_progress = False
+
+        if result.responded:
+            self._append_detail_log(
+                f"Device detected on {result.port}: {result.device_id}"
+            )
+        else:
+            self._append_detail_log("Device detected: no")
+
+        if result.matched:
+            self._append_detail_log(
+                "Signature verification result: trusted Ed25519 identity matched."
+            )
+        elif result.responded:
+            self._append_detail_log(
+                "Signature verification result: device identity did not match trusted Ed25519 key."
+            )
+        elif result.error:
+            self._append_detail_log(f"Hardware detection result: {result.error}")
+            self._append_detail_log("Signature verification result: not available.")
+        else:
+            self._append_detail_log("Signature verification result: not available.")
 
         if result.matched:
             self.config_manager.update_section(
@@ -1129,12 +1194,16 @@ class SetupWizardWindow(QWidget):
                 self._set_status_error(
                     "Trusted public key file is invalid. Cannot bind hardware key."
                 )
+            elif result.error == "hardware_check_failed":
+                self._set_status_error(
+                    "Hardware key check failed. View Details for technical information."
+                )
             elif result.responded:
                 self._set_status_error(
                     "A device responded, but its identity does not match the trusted hardware key."
                 )
             else:
-                self._set_status_idle(
+                self._set_status_error(
                     "Hardware key was not detected. Connect the USB hardware key and click Recheck."
                 )
 
@@ -1308,7 +1377,7 @@ class SetupWizardWindow(QWidget):
             self.selected_workspace_path = str(
                 self._config_path(
                     configured_path,
-                    self.project_root / "data" / "workspace.hc",
+                    resolve_app_path("data/workspace.hc"),
                 )
             )
 
@@ -1970,7 +2039,7 @@ class SetupWizardWindow(QWidget):
 
             recovery_blob_path = self._config_path(
                 recovery_config.get("recovery_blob_path"),
-                self.project_root / "data" / "recovery_blob.json",
+                resolve_app_path("data/recovery/recovery_blob.json"),
             )
             return recovery_blob_path.is_file()
         except (OSError, TypeError, ValueError):
@@ -2040,9 +2109,11 @@ class SetupWizardWindow(QWidget):
 
     def _recovery_setup_worker(self, password: str):
         try:
-            recovery_key = RecoveryManager(self.project_root).create_recovery_blob(
-                password
-            )
+            recovery_manager = RecoveryManager()
+            for line in recovery_manager.get_configuration_diagnostics():
+                self.recovery_log_signal.emit(line)
+
+            recovery_key = recovery_manager.create_recovery_blob(password)
         except RecoveryError as e:
             self.recovery_finished_signal.emit(
                 False,
@@ -2078,8 +2149,8 @@ class SetupWizardWindow(QWidget):
                 "recovery",
                 {
                     "enabled": True,
-                    "recovery_blob_path": "data/recovery_blob.json",
-                    "consumed_flag_path": "data/recovery_consumed.flag",
+                    "recovery_blob_path": "data/recovery/recovery_blob.json",
+                    "consumed_flag_path": "data/recovery/recovery_consumed.flag",
                 },
             )
             self.recovery_setup_done = True
@@ -2099,6 +2170,7 @@ class SetupWizardWindow(QWidget):
                     "Recovery key is already configured. You can continue to the next step."
                 )
             else:
+                self._append_detail_log(message)
                 self._set_status_error(message)
                 self.config_manager.update_section(
                     "recovery",
@@ -2126,7 +2198,7 @@ class SetupWizardWindow(QWidget):
         if path.is_absolute():
             return path
 
-        return self.project_root / path
+        return resolve_app_path(path)
 
     def _config_app_path(self, value, default_path: str | Path) -> Path:
         if isinstance(value, str):
@@ -2156,11 +2228,11 @@ class SetupWizardWindow(QWidget):
 
         workspace_path = self._config_path(
             workspace_config.get("container_path"),
-            self.project_root / "data" / "workspace.hc",
+            resolve_app_path("data/workspace.hc"),
         )
         recovery_blob_path = self._config_path(
             recovery_config.get("recovery_blob_path"),
-            self.project_root / "data" / "recovery_blob.json",
+            resolve_app_path("data/recovery/recovery_blob.json"),
         )
 
         def path_exists(path: Path) -> bool:
@@ -2252,7 +2324,9 @@ class SetupWizardWindow(QWidget):
                 return
 
         if self.steps[self.current_index] == SetupStep.detect_hardware:
-            self.check_hardware_status()
+            if self.hardware_check_in_progress:
+                return
+
             if self.hardware_bound is not True:
                 return
 

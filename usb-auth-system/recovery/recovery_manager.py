@@ -14,6 +14,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+from utils.runtime_paths import get_app_base_dir, resolve_app_path
+
 
 logger = logging.getLogger(__name__)
 
@@ -25,20 +27,25 @@ class RecoveryError(Exception):
 class RecoveryManager:
     KDF_ITERATIONS = 600000
     AAD_PREFIX = b"USBDEF_SERVER_RECOVERY_V1"
+    REQUIRED_ENV_KEYS = (
+        "SUPABASE_RECOVERY_BASE_URL",
+        "SUPABASE_ANON_KEY",
+    )
 
     def __init__(self, project_root: Path | None = None, timeout: float = 10.0):
-        self.project_root = Path(project_root or Path(__file__).resolve().parents[1])
-        self.data_dir = self.project_root / "data"
+        self.project_root = get_app_base_dir()
+        self.data_dir = resolve_app_path("data/recovery")
         self.blob_path = self.data_dir / "recovery_blob.json"
         self.consumed_flag_path = self.data_dir / "recovery_consumed.flag"
+        self.env_path = resolve_app_path(".env")
+        self.env_file_found = False
+        self.env_read_error = ""
+        self.env_values: dict[str, str] = {}
         self.timeout = timeout
         self.last_error = ""
 
         self._load_dotenv()
-        self.base_url = self._normalize_base_url(
-            os.environ.get("SUPABASE_RECOVERY_BASE_URL", "")
-        )
-        self.anon_key = os.environ.get("SUPABASE_ANON_KEY", "")
+        self._refresh_recovery_config()
 
     def has_recovery_blob(self) -> bool:
         return self.blob_path.exists()
@@ -73,7 +80,7 @@ class RecoveryManager:
         if status == "consumed":
             raise RecoveryError("Recovery key has already been consumed.")
 
-        base_url = self._require_base_url()
+        base_url = self._require_recovery_config()
         recovery_key = self._generate_recovery_key()
         normalized_key = self._normalize_recovery_key(recovery_key)
         salt = secrets.token_bytes(16)
@@ -135,6 +142,7 @@ class RecoveryManager:
             return None
 
         try:
+            self._require_recovery_config()
             blob = self._load_blob()
             self._validate_blob(blob)
 
@@ -217,12 +225,16 @@ class RecoveryManager:
             pass
 
     def _load_dotenv(self):
-        env_path = self.project_root / ".env"
+        self.env_values = {}
+        self.env_read_error = ""
+        env_path = self.env_path
+        self.env_file_found = env_path.is_file()
+
         if not env_path.exists():
             return
 
         try:
-            for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            for raw_line in env_path.read_text(encoding="utf-8-sig").splitlines():
                 line = raw_line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
@@ -231,9 +243,12 @@ class RecoveryManager:
                 key = key.strip()
                 value = value.strip().strip('"').strip("'")
 
-                if key and key not in os.environ:
-                    os.environ[key] = value
-        except OSError:
+                if key:
+                    self.env_values[key] = value
+                    if key not in os.environ:
+                        os.environ[key] = value
+        except OSError as e:
+            self.env_read_error = str(e)
             return
 
     @staticmethod
@@ -254,11 +269,49 @@ class RecoveryManager:
         )
         return f"{normalized_base_url}/{endpoint.strip('/')}"
 
-    def _require_base_url(self) -> str:
-        self.base_url = self._normalize_base_url(self.base_url)
+    def _refresh_recovery_config(self) -> None:
+        self.base_url = self._normalize_base_url(
+            self.env_values.get("SUPABASE_RECOVERY_BASE_URL", "")
+        )
+        self.anon_key = self.env_values.get("SUPABASE_ANON_KEY", "").strip()
 
-        if not self.base_url:
-            raise RecoveryError("SUPABASE_RECOVERY_BASE_URL is not configured.")
+    def get_configuration_diagnostics(self) -> list[str]:
+        self._load_dotenv()
+        self._refresh_recovery_config()
+        return [
+            f"Recovery .env path: {self.env_path}",
+            f"Recovery .env found: {'yes' if self.env_file_found else 'no'}",
+            (
+                "SUPABASE_RECOVERY_BASE_URL found: "
+                f"{'yes' if bool(self.base_url) else 'no'}"
+            ),
+            f"SUPABASE_ANON_KEY found: {'yes' if bool(self.anon_key) else 'no'}",
+        ]
+
+    def _require_recovery_config(self) -> str:
+        self._load_dotenv()
+        self._refresh_recovery_config()
+
+        if not self.env_file_found:
+            raise RecoveryError(
+                f"Recovery configuration file was not found at: {self.env_path}"
+            )
+
+        if self.env_read_error:
+            raise RecoveryError(
+                f"Recovery configuration file could not be read at: {self.env_path}"
+            )
+
+        missing = [
+            key
+            for key in self.REQUIRED_ENV_KEYS
+            if not self.env_values.get(key, "").strip()
+        ]
+        if missing:
+            raise RecoveryError(
+                "Recovery configuration is incomplete. "
+                "SUPABASE_RECOVERY_BASE_URL or SUPABASE_ANON_KEY is missing."
+            )
 
         return self.base_url
 

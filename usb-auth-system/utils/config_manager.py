@@ -5,9 +5,9 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from utils.runtime_paths import resolve_app_path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR = resolve_app_path("data")
 CONFIG_PATH = DATA_DIR / "app_config.json"
 
 SETUP_STEPS = (
@@ -129,8 +129,8 @@ def get_default_config() -> dict[str, Any]:
         },
         "recovery": {
             "enabled": False,
-            "recovery_blob_path": "data/recovery_blob.json",
-            "consumed_flag_path": "data/recovery_consumed.flag",
+            "recovery_blob_path": "data/recovery/recovery_blob.json",
+            "consumed_flag_path": "data/recovery/recovery_consumed.flag",
         },
     }
 
@@ -185,6 +185,13 @@ def _merge_defaults(
 def _strip_unsupported_release_keys(config: dict[str, Any]) -> dict[str, Any]:
     normalized_config = dict(config)
     normalized_config.pop("developer" + "_mode", None)
+    recovery_config = normalized_config.get("recovery")
+    if isinstance(recovery_config, dict):
+        recovery_config = dict(recovery_config)
+        recovery_config["recovery_blob_path"] = "data/recovery/recovery_blob.json"
+        recovery_config["consumed_flag_path"] = "data/recovery/recovery_consumed.flag"
+        normalized_config["recovery"] = recovery_config
+
     return normalized_config
 
 
