@@ -815,14 +815,10 @@ class MainWindow(QWidget):
 
     def handle_recovery_generation_match(self, user_id, confidence):
         with self.recovery_generation_lock:
-            if not self.pending_recovery_generation:
-                return
-
             if self.recovery_generation_in_progress:
                 self.log("Recovery setup already in progress.")
                 return
 
-            self.pending_recovery_generation = False
             self.recovery_generation_in_progress = True
 
         self.dashboard_update_signal.emit()
@@ -873,6 +869,7 @@ class MainWindow(QWidget):
             return
         finally:
             password = None
+            self.pending_recovery_generation = False
             with self.recovery_generation_lock:
                 self.recovery_generation_in_progress = False
             self.dashboard_update_signal.emit()
